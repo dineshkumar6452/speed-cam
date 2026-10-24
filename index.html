@@ -40,7 +40,7 @@
   #status{font-size:13px;color:var(--muted);min-height:1.2em}
   #banner{position:fixed;left:50%;top:calc(12px + env(safe-area-inset-top));transform:translateX(-50%);
     background:var(--danger);color:#fff;font-family:var(--display);font-size:26px;font-weight:700;
-    padding:10px 20px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.4);z-index:2000;white-space:nowrap}
+    padding:10px 20px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.4);z-index:2000;text-align:center;width:max-content;max-width:calc(100% - 32px);cursor:pointer}
   dialog{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:12px;max-width:440px;width:calc(100% - 32px)}
   dialog label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
   dialog input{width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:15px var(--body)}
@@ -251,17 +251,48 @@
     if(!cfg.voice||!("speechSynthesis" in window)) return;
     speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text); u.rate=1.05; speechSynthesis.speak(u);
   }
-  let bannerTimer;
-  function alertCam(d,c,stage){
-    const m=Math.round(d/50)*50;
-    banner.textContent=`📷 Camera in ${m} m${c.maxspeed?` · limit ${c.maxspeed}`:""}`;
-    banner.hidden=false; clearTimeout(bannerTimer); bannerTimer=setTimeout(()=>banner.hidden=true,6000);
-    beep(stage===2?3:2);
-    if(navigator.vibrate) navigator.vibrate(stage===2?[300,100,300,100,300]:[300,150,300]);
-    say(stage===2?`Speed camera close, ${m} metres${c.maxspeed?`. Limit ${c.maxspeed}`:""}`
-                 :`Speed camera ahead in ${m} metres${c.maxspeed?`. Speed limit ${c.maxspeed}`:""}`);
+  // ---------- continuous alarm ----------
+  // active = the camera currently being warned about. It keeps alarming until you pass it
+  // (it ends up behind you) or you leave the warning radius.
+  let active=null, mutedId=null;
+  const passed=new Set();                 // cameras already crossed; re-armed once you're far away
+  const fmt = d => d>=1000 ? (d/1000).toFixed(1)+" km" : Math.round(d/10)*10+" m";
+  function showBanner(){
+    if(!active){ banner.hidden=true; return; }
+    const {c,d}=active;
+    banner.textContent=`⚠️ Camera in ${fmt(d)}${c.maxspeed?` · limit ${c.maxspeed}`:""}${mutedId===c.id?" · muted":" · tap to mute"}`;
+    banner.style.background = d<300 ? "var(--danger)" : "#d97706";
+    banner.hidden=false;
   }
-  const alerted=new Map(); // camId -> stage reached
+  function alarmTick(){
+    if(!active || mutedId===active.c.id) return;
+    const now=Date.now(), {c,d}=active;
+    const gap = d<300 ? 2000 : d<500 ? 4000 : 6000;      // beeps get faster as you get closer
+    if(now-active.lastBeep>=gap){
+      active.lastBeep=now; beep(d<300?3:2);
+      if(navigator.vibrate) navigator.vibrate(d<300?[250,100,250,100,250]:[300,150,300]);
+    }
+    if(now-active.lastVoice>=12000){
+      active.lastVoice=now;
+      const where = c.name ? `, ${c.name}` : "";
+      say(`${d<300?"Speed camera close":"Speed camera ahead"}, ${Math.round(d/50)*50} metres${where}${c.maxspeed?`. Limit ${c.maxspeed}`:""}`);
+    }
+  }
+  setInterval(alarmTick,500);
+  banner.onclick=()=>{ if(active){ mutedId=active.c.id; window.speechSynthesis?.cancel(); showBanner(); } };
+  function setActive(c,d){
+    if(!active || active.c.id!==c.id) active={c,d,lastBeep:0,lastVoice:0};
+    else active.d=d;
+    showBanner(); alarmTick();
+  }
+  function clearActive(reason){
+    if(!active) return;
+    const wasMuted = mutedId===active.c.id;
+    passed.add(active.c.id); active=null; mutedId=null; showBanner();
+    if(!wasMuted && reason==="passed") say("Camera passed");
+  }
+  // test button helper
+  function alertCam(d,c){ setActive({...c,id:"test"},d); setTimeout(()=>{ if(active&&active.c.id==="test"){ active=null; showBanner(); } },8000); }
 
   // ---------- tracking ----------
   let prev=null, heading=null, cur=null, watchId=null, wakeLock=null;
@@ -284,13 +315,24 @@
     let best=null;
     for(const c of allCams()){
       const d=dist(lat,lon,c.lat,c.lon);
-      if(d>range*1.6){ alerted.delete(c.id); continue; }
-      if(d>range) continue;
+      if(d>range*1.6){ passed.delete(c.id); continue; }
+      if(passed.has(c.id) || d>range) continue;
       // "ahead": within ±50° of travel direction (or very close). No heading yet → count everything nearby.
       const ahead = heading==null || d<60 || angDiff(heading,bearing(lat,lon,c.lat,c.lon))<=50;
       // if camera has a facing direction, skip ones pointed at the opposite carriageway
       const facing = c.dir==null || heading==null || angDiff(c.dir,heading)<=90 || angDiff(c.dir,(heading+180)%360)<=90;
       if(ahead && facing && (!best || d<best.d)) best={c,d};
+    }
+    // keep the camera already alarming, with extra tolerance for hill bends
+    if(active && active.c.id!=="test"){
+      const c=allCams().find(x=>x.id===active.c.id);
+      if(c){
+        const d=dist(lat,lon,c.lat,c.lon);
+        const ang = heading==null ? 0 : angDiff(heading,bearing(lat,lon,c.lat,c.lon));
+        if(d>range*1.05) clearActive("left");
+        else if(d>=40 && ang>100) clearActive("passed");     // camera is now behind you
+        else if(!best || best.c.id===c.id || best.d>d) best={c,d};
+      } else clearActive("left");
     }
     const g=$("camGauge");
     if(!best){
@@ -298,13 +340,11 @@
       g.className="gauge"; setLimit(null); return;
     }
     const {c,d}=best;
-    $("camDist").textContent = d>=1000 ? (d/1000).toFixed(1)+" km" : Math.round(d/10)*10+" m";
+    $("camDist").textContent = fmt(d);
     $("camInfo").textContent = c.mine ? "marked by you" : c.preset ? (c.name || "saved list") : "OpenStreetMap";
     setLimit(c.maxspeed, kmh);
     g.className = "gauge " + (d<300 ? "close" : "near");
-    const stage=alerted.get(c.id)||0;
-    if(stage<1){ alerted.set(c.id,1); alertCam(d,c,1); }
-    else if(stage<2 && d<300){ alerted.set(c.id,2); alertCam(d,c,2); }
+    setActive(c,d);
   }
   function setLimit(v){
     $("limitWrap").innerHTML = v ? `<span class="limit">${v}</span>` : `<b id="limit" style="font-size:22px">–</b>`;
@@ -336,7 +376,7 @@
   $("startBtn").onclick=start;
   $("testBtn").onclick=async()=>{
     try{ audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)(); await audioCtx.resume(); }catch{}
-    alertCam(cfg.range,{maxspeed:60},1);
+    alertCam(cfg.range*0.8,{maxspeed:60,name:"test"});
   };
   $("addBtn").onclick=()=>{
     if(!cur){ setStatus("Start driving first so I know where you are."); return; }
