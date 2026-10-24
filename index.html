@@ -77,9 +77,11 @@
   <input id="rangeIn" type="number" min="200" max="3000" step="100" value="1000">
   <label for="voiceIn"><input id="voiceIn" type="checkbox" checked style="width:auto"> Voice announcement</label>
   <div class="row" style="margin-top:14px">
+    <button id="copyMine">Copy my cameras</button>
     <button id="clearMine">Delete my cameras</button>
     <button class="primary" id="saveSet">Save</button>
   </div>
+  <textarea id="exportOut" hidden rows="6" readonly style="width:100%;margin-top:10px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;font:12px monospace"></textarea>
 </dialog>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -147,12 +149,13 @@
     drawCams(list){
       this.camMarkers.forEach(m=> this.kind==="google"? m.setMap(null) : m.remove());
       this.camMarkers=list.map(c=>{
-        const label = (c.mine?"Your camera":"Speed camera")+(c.maxspeed?` · ${c.maxspeed} km/h`:"");
+        const label = (c.mine?"Your camera":c.preset?(c.name||"Saved camera"):"Speed camera")+(c.maxspeed?` · ${c.maxspeed} km/h`:"");
+        const color = c.mine?"#ffb020":c.preset?"#b46cff":"#ff4d4f";
         if(this.kind==="google"){
           return new google.maps.Marker({map:this.map,position:{lat:c.lat,lng:c.lon},title:label,
-            icon:{path:google.maps.SymbolPath.CIRCLE,scale:8,fillColor:c.mine?"#ffb020":"#ff4d4f",fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
+            icon:{path:google.maps.SymbolPath.CIRCLE,scale:8,fillColor:color,fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
         }
-        return L.circleMarker([c.lat,c.lon],{radius:8,color:"#fff",weight:2,fillColor:c.mine?"#ffb020":"#ff4d4f",fillOpacity:1})
+        return L.circleMarker([c.lat,c.lon],{radius:8,color:"#fff",weight:2,fillColor:color,fillOpacity:1})
           .bindPopup(label).addTo(this.map);
       });
     }
@@ -186,7 +189,7 @@
           maxspeed:parseInt((e.tags&&e.tags.maxspeed)||"",10)||null,
           dir: e.tags&&e.tags.direction&&!isNaN(+e.tags.direction)? +e.tags.direction : null}));
         lastFetch={lat,lon};
-        setStatus(`${osmCams.length} cameras from OpenStreetMap within 20 km · ${myCams.length} marked by you`);
+        setStatus(`${presetCams.length} saved · ${osmCams.length} from OpenStreetMap within 20 km · ${myCams.length} marked by you`);
         MapView.drawCams(allCams());
         fetching=false; return;
       }catch{}
@@ -194,7 +197,36 @@
     fetching=false;
     setStatus("Couldn't download camera data (no internet?). Using your own marked cameras.");
   }
-  const allCams = () => osmCams.concat(myCams.map(c=>({...c,mine:true})));
+  // ---------- hardcoded cameras ----------
+  // Add cameras here directly, OR (easier) edit cameras.json in the same folder.
+  // Format: { lat: 31.7080, lon: 76.9320, maxspeed: 50, dir: 90, name: "Mandi bypass" }
+  //   maxspeed, dir (compass degrees the camera faces) and name are optional.
+  const PRESET_CAMS = [
+  ];
+  let presetCams = [];
+  function normPreset(list, src){
+    return (Array.isArray(list)?list:[]).filter(c=>isFinite(+c.lat)&&isFinite(+c.lon)).map((c,i)=>({
+      id:`${src}${i}_${c.lat}_${c.lon}`, lat:+c.lat, lon:+c.lon,
+      maxspeed: parseInt(c.maxspeed,10)||null,
+      dir: c.dir!=null && isFinite(+c.dir) ? +c.dir : null,
+      name: c.name||"", preset:true }));
+  }
+  async function loadPresets(){
+    presetCams = normPreset(PRESET_CAMS,"pc");
+    try{
+      const r = await fetch("cameras.json?v="+Date.now(), {cache:"no-store"});
+      if(r.ok){ presetCams = presetCams.concat(normPreset(await r.json(),"pj")); store.set("sca_presetcache", presetCams); }
+      else throw 0;
+    }catch{
+      // offline: use the copy saved last time
+      const cached = store.get("sca_presetcache", null);
+      if(cached && cached.length > presetCams.length) presetCams = cached;
+    }
+    if(MapView.map) MapView.drawCams(allCams());
+  }
+  loadPresets();
+
+  const allCams = () => presetCams.concat(osmCams, myCams.map(c=>({...c,mine:true})));
 
   // ---------- alerts ----------
   let audioCtx=null;
@@ -259,7 +291,7 @@
     }
     const {c,d}=best;
     $("camDist").textContent = d>=1000 ? (d/1000).toFixed(1)+" km" : Math.round(d/10)*10+" m";
-    $("camInfo").textContent = c.mine ? "marked by you" : "OpenStreetMap";
+    $("camInfo").textContent = c.mine ? "marked by you" : c.preset ? (c.name || "saved list") : "OpenStreetMap";
     setLimit(c.maxspeed, kmh);
     g.className = "gauge " + (d<300 ? "close" : "near");
     const stage=alerted.get(c.id)||0;
@@ -311,6 +343,12 @@
     cfg.key=$("keyIn").value.trim(); cfg.range=Math.max(200,Math.min(3000,+$("rangeIn").value||1000)); cfg.voice=$("voiceIn").checked;
     store.set("sca_cfg",cfg); dlg.close();
     if(keyChanged) location.reload();
+  };
+  $("copyMine").onclick=async()=>{
+    const json = JSON.stringify(myCams.map(c=>({lat:+c.lat.toFixed(6),lon:+c.lon.toFixed(6),maxspeed:c.maxspeed||null,name:""})),null,2);
+    try{ await navigator.clipboard.writeText(json); $("copyMine").textContent="Copied ✓"; }
+    catch{ const t=$("exportOut"); t.value=json; t.hidden=false; t.select(); $("copyMine").textContent="Select & copy below"; }
+    setTimeout(()=>$("copyMine").textContent="Copy my cameras",2000);
   };
   $("clearMine").onclick=()=>{ myCams=[]; store.set("sca_mycams",myCams); MapView.drawCams(allCams()); setStatus("Your marked cameras were deleted."); };
 })();
