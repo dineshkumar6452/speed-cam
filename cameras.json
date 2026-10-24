@@ -1,4 +1,6 @@
 [
   { "lat": 31.5963521, "lon": 76.9243363, "name": "Dadour, Mandi" },
-  { "lat": 31.6305166, "lon": 76.9401862, "name": "Nagchala, Mandi" }
+  { "lat": 31.6305166, "lon": 76.9401862, "name": "Nagchala, Mandi" },
+  { "lat": 31.4516944, "lon": 76.8548611, "name": "Camera 3" },
+  { "lat": 31.3772500, "lon": 76.7240556, "name": "Camera 4" }
 ]
